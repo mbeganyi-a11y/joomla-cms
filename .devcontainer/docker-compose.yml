@@ -9,7 +9,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      - "3306:3306"
       - "6080:6080"
     command: sleep infinity
 
@@ -24,6 +23,18 @@ services:
       MYSQL_PASSWORD: joomla_ut
     volumes:
       - "mysql-data:/var/lib/mysql"
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mysql
+      PMA_USER: joomla_ut
+      PMA_PASSWORD: joomla_ut
+    depends_on:
+      - mysql
+    ports:
+      - "8081:80"
 
   mailpit:
     image: axllent/mailpit:latest

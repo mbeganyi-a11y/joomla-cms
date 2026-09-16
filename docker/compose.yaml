@@ -1,0 +1,69 @@
+# Local preview stack. One isolated project per previewed ref.
+#
+# Driven by bin/preview -- do not run 'docker compose' here by hand, the
+# variables below have no sensible defaults.
+#
+# Reuses .devcontainer/Dockerfile so a local preview runs the exact same PHP
+# and Apache build as a Codespaces preview.
+
+name: joomla-preview-${PREVIEW_SLUG}
+
+services:
+  web:
+    build:
+      context: ../.devcontainer
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # installation/joomla.php refuses to install on a localhost host name
+      # unless this is set (same flag the CI system tests use).
+      JOOMLA_INSTALLATION_DISABLE_LOCALHOST_CHECK: 1
+    volumes:
+      # The docroot baked into .devcontainer/Dockerfile.
+      - ${PREVIEW_WORKTREE}:/workspaces/joomla-cms
+      # Tooling comes from the tooling branch, never from the previewed ref,
+      # so the previewed commits stay untouched.
+      - ${PREVIEW_TOOLING}:/tooling:ro
+      - ./joomla-dev.conf:/etc/apache2/conf-enabled/joomla-dev.conf:ro
+      # Shared caches make the second and later previews fast.
+      - composer-cache:/root/.composer/cache
+      - npm-cache:/root/.npm
+    ports:
+      - "${PREVIEW_PORT}:80"
+    depends_on:
+      - mysql
+
+  mysql:
+    # Pinned to 8.0 to match .devcontainer/docker-compose.yml, so a local
+    # preview and a Codespaces preview run the same database. Note that
+    # --default-authentication-plugin was REMOVED in MySQL 8.4; bumping the
+    # image means dropping that flag (or using --mysql-native-password=ON).
+    image: mysql:8.0
+    restart: unless-stopped
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: test_joomla
+      MYSQL_USER: joomla_ut
+      MYSQL_PASSWORD: joomla_ut
+    volumes:
+      # A named volume, unlike the tmpfs in tests/System/docker-compose.yml:
+      # a preview should survive 'bin/preview stop' and a machine reboot.
+      - db-data:/var/lib/mysql
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "${PREVIEW_MAIL_PORT}:8025"
+
+volumes:
+  # Per preview: each one gets its own database.
+  db-data:
+  # Shared across ALL previews. Compose scopes volume names to the project by
+  # default, which would give every preview a cold cache, so these are pinned
+  # to fixed global names.
+  composer-cache:
+    name: joomla-preview-composer-cache
+  npm-cache:
+    name: joomla-preview-npm-cache

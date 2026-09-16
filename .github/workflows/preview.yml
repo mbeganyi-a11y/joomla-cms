@@ -1,0 +1,133 @@
+# Builds a disposable "preview/*" branch that carries the previewed commits
+# PLUS this fork's preview tooling, and hands back a one-click Codespaces link.
+#
+# Why the indirection: Codespaces can only use a dev container configuration
+# that exists in the ref it is created from, but none of this tooling may ever
+# become an ancestor of a branch that Mike opens a pull request from -- a
+# GitHub pull request diffs merge-base(base, head)...head, so tooling commits
+# in his branch's history would show up in the diff against joomla/joomla-cms.
+#
+# So the branches Mike works on stay pristine, and this workflow composes the
+# preview branch instead. The preview branch is never the source of a pull
+# request and is deleted by preview-cleanup.yml.
+
+name: Preview environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag or SHA to build a preview for'
+        required: true
+        type: string
+  issue_comment:
+    types: [created]
+
+jobs:
+  overlay:
+    name: Compose preview branch
+    # Only react to '/preview' on a pull request, or to a manual dispatch.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request != null &&
+       startsWith(github.event.comment.body, '/preview'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out the tooling branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the ref to preview
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            target="$INPUT_REF"
+          else
+            target=$(gh pr view "$PR_NUMBER" --json headRefName --jq .headRefName)
+          fi
+          slug=$(echo "$target" | tr '[:upper:]' '[:lower:]' \
+                 | sed -e 's#[^a-z0-9._/-]\+#-#g' -e 's#^-##' -e 's#-$##')
+          echo "target=$target"                >> "$GITHUB_OUTPUT"
+          echo "preview_branch=preview/$slug"  >> "$GITHUB_OUTPUT"
+
+      - name: Compose and push the preview branch
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+          PREVIEW_BRANCH: ${{ steps.target.outputs.preview_branch }}
+        run: |
+          set -euo pipefail
+          tooling_sha=$(git rev-parse HEAD)
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch --quiet origin "$TARGET"
+          git checkout -B "$PREVIEW_BRANCH" "origin/${TARGET}"
+
+          # Overlay the tooling. Using a path checkout rather than a merge
+          # keeps this conflict-free no matter what the previewed ref contains.
+          git checkout "$tooling_sha" -- .devcontainer docker bin
+
+          # This branch is disposable and must never consume CI minutes: the
+          # upstream pipeline is a 14-job system-test matrix. Workflows are
+          # read from the pushed commit, so removing them disables all of them.
+          rm -rf .github/workflows
+
+          git add -A .devcontainer docker bin .github
+          git commit --quiet \
+            -m "DO NOT MERGE: preview tooling overlay" \
+            -m "Disposable preview branch for '${TARGET}', composed by preview.yml from tooling ${tooling_sha}. Never open a pull request from this branch."
+
+          git push --force --quiet origin "$PREVIEW_BRANCH"
+          echo "Pushed ${PREVIEW_BRANCH}"
+
+      - name: Build the report
+        id: report
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+          PREVIEW_BRANCH: ${{ steps.target.outputs.preview_branch }}
+          REPO_ID: ${{ github.event.repository.id }}
+        run: |
+          link="https://github.com/codespaces/new?hide_repo_select=true&repo=${REPO_ID}&ref=$(printf '%s' "$PREVIEW_BRANCH" | sed 's#/#%2F#g')&devcontainer_path=.devcontainer%2Fdevcontainer.json"
+          {
+            echo "### 🚀 Preview environment for \`${TARGET}\`"
+            echo
+            echo "**[Open a Codespace preview](${link})**"
+            echo
+            echo "Once it boots, the site URL, admin URL and credentials are printed in the"
+            echo "terminal and saved to \`codespace-details.txt\`. Admin login is"
+            echo "\`ci-admin\` / \`joomla-17082005\`."
+            echo
+            echo "**Screen reader testing:** open that URL in your own browser and drive it"
+            echo "with NVDA/JAWS/VoiceOver as usual. The screen reader reads your browser's"
+            echo "accessibility tree, so it does not matter that the server is in the cloud."
+            echo "To let someone without codespace access open it: Ports tab → right-click"
+            echo "port 443 → Port Visibility → Public."
+            echo
+            echo "Prefer local, or need it offline? \`bin/preview up ${TARGET}\` on the"
+            echo "tooling branch gives the same site on \`localhost\`."
+            echo
+            echo "<sub>Built from the disposable branch \`${PREVIEW_BRANCH}\` (previewed commits +"
+            echo "this fork's tooling). Your working branch \`${TARGET}\` is untouched, so a"
+            echo "pull request opened from it contains only your own changes. Never open a"
+            echo "pull request from \`${PREVIEW_BRANCH}\`.</sub>"
+          } > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: gh pr comment "$PR_NUMBER" --body-file report.md

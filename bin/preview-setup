@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# One-time local setup for the preview tooling. Safe to re-run.
+#
+# Deliberately does NOT touch .gitignore: that file is tracked upstream, so
+# adding entries to it would itself show up as a diff in a pull request
+# against joomla/joomla-cms. .git/info/exclude does the same job and is local
+# to this clone -- it is never committed and never pushed.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+EXCLUDE_FILE="${REPO_ROOT}/.git/info/exclude"
+UPSTREAM_URL="${JOOMLA_UPSTREAM_URL:-https://github.com/joomla/joomla-cms.git}"
+
+echo "--> Configuring local excludes"
+mkdir -p "$(dirname "$EXCLUDE_FILE")"
+for pattern in '.previews/' 'codespace-details.txt' '.claude-mpm/'; do
+    if ! grep -qxF "$pattern" "$EXCLUDE_FILE" 2>/dev/null; then
+        echo "$pattern" >> "$EXCLUDE_FILE"
+        echo "    added: $pattern"
+    fi
+done
+
+if git remote get-url upstream >/dev/null 2>&1; then
+    echo "--> 'upstream' remote already configured: $(git remote get-url upstream)"
+else
+    echo "--> Adding 'upstream' remote -> ${UPSTREAM_URL}"
+    git remote add upstream "$UPSTREAM_URL"
+fi
+
+echo "--> Fetching upstream (this takes a moment on first run)"
+git fetch --quiet upstream 5.4-dev
+
+echo
+echo "✅ Setup complete."
+echo
+echo "Create a preview:            bin/preview up <pr-number|branch>"
+echo "List previews:               bin/preview list"
+echo "Destroy a preview:           bin/preview down <slug>"
+echo "Check a branch is PR-clean:  bin/pr-check <branch>"

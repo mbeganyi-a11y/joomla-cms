@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+#
+# Spin up a throwaway local Joomla site for any branch, PR or commit.
+#
+#   bin/preview up <pr-number|branch|sha>   create (or rebuild) a preview
+#   bin/preview down <slug>                 destroy it (containers + data + worktree)
+#   bin/preview list                        show running previews
+#
+# Isolation guarantee: the previewed ref is checked out into a git worktree
+# under .previews/ and is never modified. All tooling is bind-mounted into the
+# container from the tooling branch, so nothing in this repository's preview
+# machinery can end up in a pull request opened from the previewed branch.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PREVIEW_DIR="${REPO_ROOT}/.previews"
+STATE_DIR="${PREVIEW_DIR}/.state"
+COMPOSE_FILE="${REPO_ROOT}/docker/compose.yaml"
+TOOLING_DIR="${REPO_ROOT}/.devcontainer"
+BASE_PORT=8100
+
+# The repository Mike's accessibility pull requests target.
+UPSTREAM_URL="${JOOMLA_UPSTREAM_URL:-https://github.com/joomla/joomla-cms.git}"
+
+die() { echo "❌ $*" >&2; exit 1; }
+info() { echo "--> $*"; }
+
+slugify() { echo "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9]\+/-/g' -e 's/^-//' -e 's/-$//' | cut -c1-40; }
+
+# Joomla requires a table prefix that starts with a LETTER, contains only
+# alphanumerics and underscores, ends with an underscore and is at most 15
+# characters (installation/src/Console/InstallCommand.php, and the same rule in
+# SetConfigurationCommand::checkDb). A slug like '5-4-dev' satisfies none of
+# that, so derive a legal prefix rather than reusing the slug directly.
+db_prefix() {
+    echo "p$(echo "$1" | tr -cd '[:alnum:]' | cut -c1-12)_"
+}
+
+# Pick a free host port pair, deterministic per slug where possible.
+alloc_ports() {
+    local slug="$1" port
+    for ((port = BASE_PORT; port < BASE_PORT + 100; port += 2)); do
+        if ! lsof -iTCP:"$port" -sTCP:LISTEN -n >/dev/null 2>&1 \
+           && ! lsof -iTCP:"$((port + 1))" -sTCP:LISTEN -n >/dev/null 2>&1; then
+            echo "$port $((port + 1))"
+            return
+        fi
+    done
+    die "no free port pair found in ${BASE_PORT}-$((BASE_PORT + 100))"
+}
+
+ensure_upstream() {
+    if ! git -C "$REPO_ROOT" remote get-url upstream >/dev/null 2>&1; then
+        info "adding 'upstream' remote -> ${UPSTREAM_URL}"
+        git -C "$REPO_ROOT" remote add upstream "$UPSTREAM_URL"
+    fi
+}
+
+# Accepts a PR number (resolved against upstream), a branch, or a raw sha.
+resolve_ref() {
+    local target="$1"
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        ensure_upstream
+        info "fetching upstream pull request #${target}" >&2
+        git -C "$REPO_ROOT" fetch --quiet upstream "pull/${target}/head:refs/preview/pr-${target}"
+        echo "refs/preview/pr-${target}"
+        return
+    fi
+    if git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/${target}" >/dev/null; then
+        git -C "$REPO_ROOT" fetch --quiet origin "$target"
+        echo "origin/${target}"
+        return
+    fi
+    git -C "$REPO_ROOT" rev-parse --verify --quiet "$target" >/dev/null \
+        || die "cannot resolve '${target}' as a PR number, branch or commit"
+    echo "$target"
+}
+
+compose() {
+    local slug="$1"; shift
+    # shellcheck disable=SC1090
+    source "${STATE_DIR}/${slug}.env"
+    PREVIEW_SLUG="$slug" \
+    PREVIEW_WORKTREE="${PREVIEW_DIR}/${slug}" \
+    PREVIEW_TOOLING="$TOOLING_DIR" \
+    PREVIEW_PORT="$PREVIEW_PORT" \
+    PREVIEW_MAIL_PORT="$PREVIEW_MAIL_PORT" \
+    docker compose -f "$COMPOSE_FILE" "$@"
+}
+
+cmd_up() {
+    local target="${1:?usage: bin/preview up <pr-number|branch|sha>}"
+    local slug ref worktree ports
+    slug="$(slugify "$target")"
+    ref="$(resolve_ref "$target")"
+    worktree="${PREVIEW_DIR}/${slug}"
+
+    mkdir -p "$STATE_DIR"
+
+    if [ -d "$worktree" ]; then
+        info "reusing existing worktree for '${slug}'"
+        git -C "$worktree" checkout --quiet --detach "$ref"
+    else
+        info "creating worktree ${worktree} at ${ref}"
+        git -C "$REPO_ROOT" worktree add --quiet --detach "$worktree" "$ref"
+    fi
+
+    if [ ! -f "${STATE_DIR}/${slug}.env" ]; then
+        ports="$(alloc_ports "$slug")"
+        cat > "${STATE_DIR}/${slug}.env" <<ENV
+PREVIEW_PORT=${ports% *}
+PREVIEW_MAIL_PORT=${ports#* }
+PREVIEW_REF=${target}
+ENV
+    fi
+    # shellcheck disable=SC1090
+    source "${STATE_DIR}/${slug}.env"
+
+    info "starting containers"
+    compose "$slug" up -d --build
+
+    info "waiting for the web container"
+    compose "$slug" exec -T web bash -lc 'until [ -d /workspaces/joomla-cms ]; do sleep 1; done'
+
+    # Prefer the CI-built bundle; fall back to building in the container.
+    if [ -d "${worktree}/libraries/vendor" ] && [ -d "${worktree}/media/vendor" ]; then
+        info "dependencies already present, skipping build"
+    else
+        info "installing dependencies (first run for this ref, a few minutes)"
+        compose "$slug" exec -T web bash -lc \
+            'cd /workspaces/joomla-cms && composer install --no-progress && npm ci'
+    fi
+
+    info "installing Joomla"
+    compose "$slug" exec -T \
+        -e PREVIEW_URL="http://localhost:${PREVIEW_PORT}" \
+        -e DB_PREFIX="$(db_prefix "$slug")" \
+        web bash /tooling/install-joomla.sh
+
+    cat <<SUMMARY
+
+---
+🚀 Preview '${slug}' is up  (ref: ${PREVIEW_REF})
+
+  Site:     http://localhost:${PREVIEW_PORT}
+  Admin:    http://localhost:${PREVIEW_PORT}/administrator
+  Login:    ci-admin / joomla-17082005
+  Mailpit:  http://localhost:${PREVIEW_MAIL_PORT}
+
+  Reset:    bin/preview up ${PREVIEW_REF}
+  Destroy:  bin/preview down ${slug}
+---
+SUMMARY
+}
+
+cmd_down() {
+    local slug="${1:?usage: bin/preview down <slug>}"
+    [ -f "${STATE_DIR}/${slug}.env" ] || die "no preview named '${slug}' (try: bin/preview list)"
+    info "removing containers and volumes"
+    compose "$slug" down --volumes --remove-orphans
+    if [ -d "${PREVIEW_DIR}/${slug}" ]; then
+        info "removing worktree"
+        git -C "$REPO_ROOT" worktree remove --force "${PREVIEW_DIR}/${slug}"
+    fi
+    rm -f "${STATE_DIR}/${slug}.env"
+    git -C "$REPO_ROOT" worktree prune
+    echo "✅ preview '${slug}' destroyed"
+}
+
+cmd_list() {
+    [ -d "$STATE_DIR" ] || { echo "no previews"; return; }
+    shopt -s nullglob
+    local found=0
+    for env_file in "${STATE_DIR}"/*.env; do
+        found=1
+        local slug; slug="$(basename "$env_file" .env)"
+        # shellcheck disable=SC1090
+        (source "$env_file"; printf '%-24s ref=%-28s http://localhost:%s\n' "$slug" "$PREVIEW_REF" "$PREVIEW_PORT")
+    done
+    [ "$found" -eq 1 ] || echo "no previews"
+}
+
+case "${1:-}" in
+    up)   shift; cmd_up "$@" ;;
+    down) shift; cmd_down "$@" ;;
+    list) shift; cmd_list "$@" ;;
+    *)
+        cat >&2 <<'USAGE'
+Spin up a throwaway local Joomla site for any branch, PR or commit.
+
+  bin/preview up <pr-number|branch|sha>   create (or rebuild) a preview
+  bin/preview down <slug>                 destroy it (containers + data + worktree)
+  bin/preview list                        show running previews
+
+A PR number is resolved against the upstream repository, so you can preview
+any joomla/joomla-cms pull request, not just your own branches.
+USAGE
+        exit 1
+        ;;
+esac
