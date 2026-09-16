@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# Verifies that a branch is safe to open an upstream pull request from.
+#
+# A GitHub pull request shows merge-base(base, head)...head, so anything in a
+# branch's history that upstream does not have appears in the diff. This fork
+# carries preview tooling that must never reach joomla/joomla-cms, so run this
+# before opening a pull request:
+#
+#     bin/pr-check my-a11y-fix
+
+set -euo pipefail
+
+BRANCH="${1:?usage: bin/pr-check <branch>}"
+BASE="${2:-upstream/5.4-dev}"
+
+# Paths that exist only in this fork, that this fork modifies for previews, or
+# that a branch cut from a preview/* branch would show as deleted (the overlay
+# removes .github/workflows so disposable branches burn no CI minutes).
+TOOLING_PATHS='^(docker/|bin/|\.devcontainer/|\.github/)'
+
+git remote get-url upstream >/dev/null 2>&1 \
+    || { echo "❌ No 'upstream' remote. Run bin/preview-setup first." >&2; exit 1; }
+
+echo "--> Fetching ${BASE%%/*}"
+git fetch --quiet "${BASE%%/*}" "${BASE#*/}"
+
+merge_base="$(git merge-base "$BASE" "$BRANCH")"
+echo "--> Merge base with ${BASE}: $(git rev-parse --short "$merge_base")"
+echo
+
+files="$(git diff --name-only "${merge_base}..${BRANCH}")"
+
+if [ -z "$files" ]; then
+    echo "⚠️  No changes at all relative to ${BASE}."
+    exit 0
+fi
+
+echo "A pull request from '${BRANCH}' would contain these files:"
+echo "$files" | sed 's/^/    /'
+echo
+
+commits="$(git log --oneline "${merge_base}..${BRANCH}" | wc -l | tr -d ' ')"
+echo "Commits: ${commits}"
+if [ "$commits" -gt 2 ]; then
+    echo "⚠️  More than 2 commits. The agreed scope is 1-2 commits per pull request."
+fi
+echo
+
+if echo "$files" | grep -qE "$TOOLING_PATHS"; then
+    echo "❌ LEAK: this branch carries fork-only preview tooling:"
+    echo "$files" | grep -E "$TOOLING_PATHS" | sed 's/^/    /'
+    echo
+    echo "Do not open an upstream pull request from this branch. It was most likely"
+    echo "branched off the tooling branch, or off a preview/* branch, instead of off"
+    echo "a pristine 5.4-dev. Recreate it with:"
+    echo
+    echo "    git fetch upstream 5.4-dev"
+    echo "    git checkout -b ${BRANCH}-clean upstream/5.4-dev"
+    echo "    git cherry-pick <your commits>"
+    exit 1
+fi
+
+echo "✅ Clean. No fork-only tooling in this branch."

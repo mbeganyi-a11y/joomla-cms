@@ -7,7 +7,7 @@
         "ghcr.io/devcontainers/features/desktop-lite:1": {}
     },
     "portsAttributes": {
-        "443" : {
+        "443": {
             "label": "Web Server (Joomla & phpmyadmin)",
             "onAutoForward": "silent"
         },
@@ -17,10 +17,20 @@
         },
         "8025": {
             "label": "Mailpit Web UI",
-            "onAutoForward": "openPreview"
+            "onAutoForward": "silent"
+        },
+        "8081": {
+            "label": "phpMyAdmin",
+            "onAutoForward": "silent"
         }
     },
-    "forwardPorts": [80, 443, 6080, 8025],
+    "forwardPorts": [
+        80,
+        443,
+        6080,
+        8025,
+        8081
+    ],
     "postCreateCommand": "bash ./.devcontainer/post-create.sh",
     "customizations": {
         "vscode": {
@@ -45,5 +55,9 @@
             }
         }
     },
-    "remoteUser": "root"
+    "remoteUser": "root",
+    "postStartCommand": "bash ./.devcontainer/post-start.sh",
+    "hostRequirements": {
+        "cpus": 2
+    }
 }
