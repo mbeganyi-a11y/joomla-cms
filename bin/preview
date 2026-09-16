@@ -19,6 +19,7 @@ STATE_DIR="${PREVIEW_DIR}/.state"
 COMPOSE_FILE="${REPO_ROOT}/docker/compose.yaml"
 TOOLING_DIR="${REPO_ROOT}/.devcontainer"
 BASE_PORT=8100
+TOOLING_BRANCH="${PREVIEW_TOOLING_BRANCH:-tooling/preview}"
 
 # The repository Mike's accessibility pull requests target.
 UPSTREAM_URL="${JOOMLA_UPSTREAM_URL:-https://github.com/joomla/joomla-cms.git}"
@@ -154,6 +155,71 @@ ENV
 SUMMARY
 }
 
+# Compose and push a disposable preview/* branch, then print the one-click
+# Codespaces link. Same overlay as .github/workflows/preview.yml, run locally.
+#
+# This exists because triggering that workflow requires the tooling branch to
+# be the repository's DEFAULT branch (GitHub reads workflow_dispatch,
+# issue_comment and schedule workflows from the default branch only), and
+# changing the default branch needs admin rights on the fork. This path needs
+# only push access.
+cmd_cloud() {
+    local target="${1:?usage: bin/preview cloud <branch>}"
+    local slug preview_branch tooling_sha worktree owner_repo
+
+    slug="$(slugify "$target")"
+    preview_branch="preview/${slug}"
+    tooling_sha="$(git -C "$REPO_ROOT" rev-parse "$TOOLING_BRANCH")"
+    worktree="${PREVIEW_DIR}/.cloud/${slug}"
+
+    git -C "$REPO_ROOT" fetch --quiet origin "$target"
+
+    # Work in a scratch worktree so the checkout you are sitting in is untouched.
+    rm -rf "$worktree"
+    info "composing ${preview_branch} from origin/${target} + tooling $(git -C "$REPO_ROOT" rev-parse --short "$tooling_sha")"
+    git -C "$REPO_ROOT" worktree add --quiet --detach --force "$worktree" "origin/${target}"
+
+    git -C "$worktree" checkout --quiet -B "$preview_branch"
+    git -C "$worktree" checkout --quiet "$tooling_sha" -- .devcontainer docker bin
+    # A disposable branch must not consume CI minutes: the upstream pipeline is
+    # a 14-job system-test matrix. Workflows are read from the pushed commit,
+    # so removing them disables every one of them.
+    rm -rf "${worktree}/.github/workflows"
+    git -C "$worktree" add -A .devcontainer docker bin .github
+    git -C "$worktree" commit --quiet \
+        -m "DO NOT MERGE: preview tooling overlay" \
+        -m "Disposable preview branch for '${target}', composed by bin/preview from tooling ${tooling_sha}. Never open a pull request from this branch."
+
+    info "pushing ${preview_branch}"
+    git -C "$worktree" push --force --quiet origin "$preview_branch"
+
+    git -C "$REPO_ROOT" worktree remove --force "$worktree"
+    git -C "$REPO_ROOT" worktree prune
+
+    owner_repo="$(git -C "$REPO_ROOT" remote get-url origin \
+        | sed -e 's#.*[:/]\([^/]*/[^/]*\)$#\1#' -e 's#\.git$##')"
+
+    cat <<SUMMARY
+
+---
+🚀 Cloud preview branch pushed for '${target}'
+
+  Open a Codespace:
+  https://codespaces.new/${owner_repo}/tree/${preview_branch}
+
+  Admin login once it boots: ci-admin / joomla-17082005
+  The site URL is printed in the terminal and in codespace-details.txt.
+
+  Screen reader testing: open that site URL in your own browser and drive it
+  with NVDA/JAWS/VoiceOver. The reader reads your browser's accessibility
+  tree, so it does not matter that the server is in the cloud.
+
+  '${target}' itself is untouched -- a pull request from it contains only
+  your own changes. Never open a pull request from ${preview_branch}.
+---
+SUMMARY
+}
+
 cmd_down() {
     local slug="${1:?usage: bin/preview down <slug>}"
     [ -f "${STATE_DIR}/${slug}.env" ] || die "no preview named '${slug}' (try: bin/preview list)"
@@ -182,14 +248,16 @@ cmd_list() {
 }
 
 case "${1:-}" in
-    up)   shift; cmd_up "$@" ;;
+    up)    shift; cmd_up "$@" ;;
+    cloud) shift; cmd_cloud "$@" ;;
     down) shift; cmd_down "$@" ;;
     list) shift; cmd_list "$@" ;;
     *)
         cat >&2 <<'USAGE'
 Spin up a throwaway local Joomla site for any branch, PR or commit.
 
-  bin/preview up <pr-number|branch|sha>   create (or rebuild) a preview
+  bin/preview up <pr-number|branch|sha>   create (or rebuild) a local preview
+  bin/preview cloud <branch>              push a preview branch + Codespaces link
   bin/preview down <slug>                 destroy it (containers + data + worktree)
   bin/preview list                        show running previews
 

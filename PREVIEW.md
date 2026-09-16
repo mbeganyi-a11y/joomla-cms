@@ -42,17 +42,25 @@ Two further safeguards, both deliberate:
 
 ## Repository setup (once)
 
-### 1. Make `tooling/preview` the fork's default branch
+### 1. Optional: make `tooling/preview` the fork's default branch
 
-Not optional, and the reason is not cosmetic: GitHub reads workflows for the
-`workflow_dispatch`, `issue_comment` and `schedule` events from the **default
-branch only**. While `5.4-dev` is the default branch, `preview.yml` can never be
-triggered. And `5.4-dev` has to stay a pristine mirror of upstream, so the
-tooling cannot live there.
+Only needed to trigger the **workflow** (`preview.yml`). GitHub reads
+`workflow_dispatch`, `issue_comment` and `schedule` workflows from the
+**default branch only**, so while `5.4-dev` is the default branch the workflow
+can never be triggered — and `5.4-dev` has to stay a pristine mirror of
+upstream, so the tooling cannot live there.
 
 ```bash
 gh repo edit mbeganyi-a11y/joomla-cms --default-branch tooling/preview
 ```
+
+**This requires admin rights on the fork**, i.e. it has to be run by the
+repository owner. With only write access the API returns `HTTP 404`.
+
+You do not have to wait for it: `bin/preview cloud <branch>` performs the exact
+same overlay from the command line and needs nothing but push access. The
+workflow is a convenience (a `/preview` comment on a pull request), not a
+requirement.
 
 This is safe for a fork: pull requests to `joomla/joomla-cms` are unaffected,
 because their base branch is chosen upstream, not here.
@@ -81,11 +89,22 @@ triggered on push and on configuration change. See "Making it fast" below.
 
 Best for: a URL you can share, and for screen reader testing.
 
+**From the command line** (works with push access alone):
+
+```bash
+git push origin my-a11y-fix
+bin/preview cloud my-a11y-fix
+```
+
+It prints a one-click Codespaces link. That is the whole flow.
+
+**From GitHub** (only once `tooling/preview` is the default branch — see
+"Repository setup"):
+
 1. Push your branch to this fork.
-2. Trigger the preview:
-   - **Actions → Preview environment → Run workflow**, enter your branch; or
-   - comment `/preview` on a pull request opened in this fork.
-3. The run summary gives you a **one-click Codespace link**. Open it.
+2. **Actions → Preview environment → Run workflow**, enter your branch; or
+   comment `/preview` on a pull request opened in this fork.
+3. The run summary gives you the same one-click Codespace link.
 
 When it boots, the terminal (and `codespace-details.txt`) prints the site URL,
 the admin URL and the credentials — `ci-admin` / `joomla-17082005`.
