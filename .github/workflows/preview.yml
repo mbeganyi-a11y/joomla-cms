@@ -55,10 +55,8 @@ jobs:
           else
             target=$(gh pr view "$PR_NUMBER" --json headRefName --jq .headRefName)
           fi
-          slug=$(echo "$target" | tr '[:upper:]' '[:lower:]' \
-                 | sed -e 's#[^a-z0-9._/-]\+#-#g' -e 's#^-##' -e 's#-$##')
-          echo "target=$target"                >> "$GITHUB_OUTPUT"
-          echo "preview_branch=preview/$slug"  >> "$GITHUB_OUTPUT"
+          echo "target=$target"                  >> "$GITHUB_OUTPUT"
+          echo "preview_branch=preview/$target"  >> "$GITHUB_OUTPUT"
 
       - name: Compose and push the preview branch
         env:

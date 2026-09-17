@@ -27,7 +27,16 @@ UPSTREAM_URL="${JOOMLA_UPSTREAM_URL:-https://github.com/joomla/joomla-cms.git}"
 die() { echo "❌ $*" >&2; exit 1; }
 info() { echo "--> $*"; }
 
-slugify() { echo "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9]\+/-/g' -e 's/^-//' -e 's/-$//' | cut -c1-40; }
+# Used for filesystem paths, the compose project name and the database prefix,
+# so it must collapse everything that is not alphanumeric -- branch names
+# routinely contain slashes and dots. Uses -E because BSD sed (macOS) does not
+# support \+ as a quantifier in basic regular expressions, which made an
+# earlier BRE version a silent no-op here and behave differently under GNU sed.
+slugify() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' \
+        | sed -E -e 's/[^a-z0-9]+/-/g' -e 's/^-+//' -e 's/-+$//' \
+        | cut -c1-40
+}
 
 # Joomla requires a table prefix that starts with a LETTER, contains only
 # alphanumerics and underscores, ends with an underscore and is at most 15
@@ -168,7 +177,9 @@ cmd_cloud() {
     local slug preview_branch tooling_sha worktree owner_repo
 
     slug="$(slugify "$target")"
-    preview_branch="preview/${slug}"
+    # Keep the branch readable and identical to what preview.yml produces; the
+    # slug is only for the scratch worktree path.
+    preview_branch="preview/${target}"
     tooling_sha="$(git -C "$REPO_ROOT" rev-parse "$TOOLING_BRANCH")"
     worktree="${PREVIEW_DIR}/.cloud/${slug}"
 
