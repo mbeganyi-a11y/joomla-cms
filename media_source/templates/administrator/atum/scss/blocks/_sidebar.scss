@@ -84,6 +84,11 @@
        text-align: inherit;
        background: transparent;
        border: 0;
+
+       &:focus-visible {
+        outline: auto .8px currentColor;
+        outline-offset: -4px;
+      }
     }
 
     .sidebar-item-title {
